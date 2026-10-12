@@ -1,0 +1,148 @@
+x-mariadb-specs: &mariadb-specs
+  image: docker.io/mariadb:11.8.8
+  restart: unless-stopped
+  command:
+    - --character-set-server=utf8mb4
+    - --collation-server=utf8mb4_unicode_ci
+    - --skip-character-set-client-handshake
+    - --skip-innodb-read-only-compressed # Temporary fix for Database 10.6
+    - --default-time-zone=+03:00
+    - --innodb-buffer-pool-size=1GB
+    - --innodb-log-file-size=1G
+  environment:
+    MYSQL_ROOT_PASSWORD: admin123
+    MARIADB_ROOT_PASSWORD: admin123
+    MARIADB_AUTO_UPGRADE: 1
+  healthcheck:
+    test: mariadb-admin ping -h localhost --password=$${MYSQL_ROOT_PASSWORD}
+    interval: 1s
+    retries: 20
+    start_period: 30s
+x-redis-common: &redis-common
+  restart: unless-stopped
+  image: redis:7.4-alpine
+  healthcheck:
+    test: [ "CMD-SHELL", "redis-cli ping | grep PONG || exit 1" ]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 10s
+  depends_on: {}
+x-network: &network
+  networks:
+    - helpdesk-network
+x-frappe-image: &frappe-image
+  restart: unless-stopped
+  build:
+    context: ./docker/bench
+    dockerfile: Dockerfile
+    target: bench
+x-frappe-specs: &frappe-specs
+  volumes:
+    - ./workspace:/workspace
+    # Enable if you require git cloning
+    - ${HOME}/.ssh:/home/frappe/.ssh
+  healthcheck:
+    test: [ "CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:8000 || exit 1" ]
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    start_period: 60s
+  depends_on:
+    mariadb:
+      condition: service_healthy
+    redis-cache:
+      condition: service_healthy
+    redis-queue:
+      condition: service_healthy
+x-frappe-env: &frappe-env
+  BUILD_ENV: docker
+  SHELL: /bin/bash
+  TZ: Africa/Nairobi
+  SCRIPT_SOURCE: /scripts
+  BENCH_DIR: /workspace/frappe-bench
+  # Bootstrap: set BOOTSTRAP=true to create/switch the bench and site on container start
+  BOOTSTRAP: ${BOOTSTRAP:-false}
+  FRAPPE_VERSION: ${FRAPPE_VERSION:-version-15}
+  # Space separated, "name" or "git-url", optional "#branch", e.g. "erpnext#version-15 https://github.com/frappe/helpdesk#develop"
+  FRAPPE_APPS: ${FRAPPE_APPS:-}
+  SITE_NAME: ${SITE_NAME:-support}
+  RESET_SITE: ${RESET_SITE:-false}
+  DB_HOST: mariadb
+  DB_ROOT_PASSWORD: admin123
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+  PYTHON_BIN: ${PYTHON_BIN:-python3.12}
+---
+services:
+  mariadb:
+    container_name: mariadb
+    <<: [*mariadb-specs,*network]
+    volumes:
+      - ./db:/var/lib/mysql
+  # Enable Mailpit if you need to test outgoing mail services
+  # See https://mailpit.axllent.org/
+  #  mailpit:
+  #    image: axllent/mailpit
+  #    volumes:
+  #      - mailpit-data:/data
+  #    ports:
+  #      - 8025:8025
+  #      - 1025:1025
+  #    environment:
+  #      MP_MAX_MESSAGES: 5000
+  #      MP_DATA_FILE: /data/mailpit.db
+  #      MP_SMTP_AUTH_ACCEPT_ANY: 1
+  #      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+  redis-cache:
+    container_name: redis-cache
+    <<: [*redis-common,*network]
+    volumes:
+      - ./redis/cache:/data
+  redis-queue:
+    container_name: redis-queue
+    <<: [*redis-common,*network]
+    volumes:
+      - ./redis/queue:/data
+  bench-dev:
+    container_name: bench-dev
+    user: frappe
+    <<: [*frappe-image,*frappe-specs,*network]
+    working_dir: /workspace/frappe-bench
+    environment:
+      <<: *frappe-env
+      ENV: dev
+      TASK: dev
+    ports:
+      - "8000:8000"
+      - "9000:9000"
+#  bench-prod:
+#    container_name: bench-prod
+#    user: frappe
+#    <<: [*frappe-image,*frappe-specs,*network]
+#    environment:
+#      <<: *frappe-env
+#      ENV: prod
+#      TASK: dev
+#    ports:
+#      - "8001:8000"
+#      - "9001:9000"
+#  queue-long:
+#    container_name: queue-long
+#    user: frappe
+#    <<: [*frappe-image,*frappe-specs,*network]
+#    environment:
+#      <<: *frappe-env
+#      ENV: prod
+#      TASK: dev
+#    ports:
+#      - "8001:8000"
+#      - "9001:9000"
+#    command:
+#      - bench
+#      - worker
+#      - --queue
+#      - long
+networks:
+  helpdesk-network:
+    name: helpdesk-network
+    driver: bridge
